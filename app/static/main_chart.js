@@ -9,6 +9,7 @@ const dates = window.dates;
 const prices = window.prices;
 const rm_200_raw = window.rm_200;
 const rm_30_raw = window.rm_30;
+const crossings = window.crossings;
 
 console.log('data lengths:', {
   dates: Array.isArray(dates) ? dates.length : typeof dates,
@@ -78,9 +79,37 @@ let rm30DataCurrent = rm30DataOriginal.slice();
 console.log('RM200 Raw Data (rm_200_raw):', rm_200_raw);
 console.log('RM200 Processed Data (rm200Data):', rm200DataCurrent);
 
+
+// Mapowanie crossingów na obiekty z datę i Y zależnym od rm200
+const crossingsArray = Array.isArray(crossings) ? crossings : [];
+const crossingDates = crossingsArray.map(d => ({
+  date: new Date(d[0]),
+  direction: d[1]
+}))
+
+const bisectRm200 = d3.bisector(d => d.Date).left;
+// Znajdź wartość Y (rm200) dla każdej daty crossing, wybierając najbliższy punkt
+const crossingsData = crossingDates.map(cd => {
+  if (!rm200DataCurrent || rm200DataCurrent.length === 0) return { ...cd, value: NaN };
+
+  const i = bisectRm200(rm200DataCurrent, cd.date);
+  // sprawdź sąsiadów i wybierz bliższy
+  const prev = rm200DataCurrent[i - 1];
+  const next = rm200DataCurrent[i];
+  let chosen = null;
+  if (prev && next) {
+    chosen = (Math.abs(cd.date - prev.Date) <= Math.abs(next.Date - cd.date)) ? prev : next;
+  } else {
+    chosen = prev || next || null;
+  }
+  return { date: cd.date, direction: cd.direction, value: chosen ? chosen.Price : NaN };
+}).filter(d => !isNaN(d.value));
+
+
 // Set the domains for the x and y scales
 x.domain(d3.extent(data, d => d.Date));
 y.domain([0, d3.max(data, d => d.Price)]);
+
 
 // Oś X
 svg.append("g")
@@ -92,7 +121,7 @@ svg.append("g")
       .tickFormat(d3.timeFormat("%Y")))
     .selectAll(".tick line")
     .style("stroke-opacity", 1)
-  svg.selectAll(".tick text")
+    .selectAll(".tick text")
     .attr("fill", "#777");
 
   // Add the y-axis
@@ -243,6 +272,61 @@ listeningRect.on("mouseleave", () => {
   tooltipLineY.style("display", "none");
 });
 
+
+function drawCrossingsDots(currentCrossingsData, currentXDomain) {
+    const dotRadius = 15;
+
+    // 1. Filtrowanie danych do aktualnie widocznego zakresu
+    const visibleCrossings = currentCrossingsData.filter(d =>
+        d.date >= currentXDomain[0] && d.date <= currentXDomain[1]
+    );
+
+    // 2. Wzór D3: JOIN, EXIT, UPDATE, ENTER
+    const dots = svg.selectAll(".crossings-dot")
+        .data(visibleCrossings, d => d.date.getTime()); // Klucz jest datą (milisekundy)
+
+    // EXIT: Usuń kropki, które wyszły poza zakres
+    dots.exit()
+        .transition().duration(200)
+        .attr("r", 0) // Efekt znikania
+        .remove();
+
+    // UPDATE: Aktualizuj pozycję (gdy zmieni się skalowanie/zakres)
+    dots.transition().duration(300)
+        .attr("cx", d => x(d.date))
+        .attr("cy", d => y(d.value))
+        // Aktualizuj kolory na bordowy i błękitny
+        .style("fill", d => d.direction === 'up' ? '#0EA5E9' : '#991B1B');
+
+    // ENTER: Dodaj nowe kropki (te, które weszły w zakres)
+    dots.enter()
+        .append("circle")
+        .attr("class", d => "crossings-dot " + d.direction)
+        .attr("r", 0) // Rozpocznij z promieniem 0
+        .attr("cx", d => x(d.date))
+        .attr("cy", d => y(d.value))
+        .style("stroke", "white")
+        .style("stroke-width", 1.5)
+        .style("cursor", "pointer")
+        .style("fill", d => d.direction === 'up' ? '#0EA5E9' : '#991B1B')
+        .on("mouseover", function(event, d) {
+             // Dodanie prostego tooltipa po najechaniu
+             d3.select(this).attr("r", dotRadius + 2);
+             tooltip.style("display", "block")
+                    .style("left", `${x(d.date) + margin.left + 15}px`)
+                    .style("top", `${y(d.value) + margin.top}px`)
+                    .html(`Przecięcie: ${d.direction === 'up' ? 'Wzrostowe' : 'Spadkowe'}<br>${d.date.toISOString().slice(0, 10)}`);
+        })
+        .on("mouseout", function(event, d) {
+             d3.select(this).attr("r", dotRadius);
+             tooltip.style("display", "none");
+        })
+        .transition().duration(300)
+        .attr("r", dotRadius); // Animacja do pełnego rozmiaru
+}
+
+drawCrossingsDots(crossingsData, x.domain());
+
 // Define the slider
 const sliderRange = d3
     .sliderBottom()
@@ -295,6 +379,26 @@ const sliderRange = d3
 
   });
 
+
+// --- TOGGLE SHIFT HANDLER ---
+function toggleShift(event) {
+    // ... (Twój kod zmiany rm30DataCurrent / rm200DataCurrent) ...
+
+    // zaktualizuj widoczną część linii zgodnie z aktualnym zakresem osi X
+    const domain = x.domain();
+    const filteredRm30 = rm30DataCurrent.filter(d => d.Date >= domain[0] && d.Date <= domain[1]);
+    const filteredRm200 = rm200DataCurrent.filter(d => d.Date >= domain[0] && d.Date <= domain[1]);
+
+    // *** C. AKTUALIZACJA PRZY ZMIANIE TOGGLE (POPRAWIONE) ***
+    // Tutaj nie zmieniasz danych crossings, ale zmieniasz skalowanie linii RM.
+    // Ponowne rysowanie kropek jest potrzebne, by zaktualizować ich pozycję w przypadku
+    // zmiany skalowania Y (choć w Twoim kodzie skala Y nie zależy od RM, na wszelki wypadek)
+    drawCrossingsDots(crossingsData, domain);
+
+    // ... (Twój kod aktualizacji linii rm30 / rm200) ...
+}
+
+
   // --- added: shift helper + toggle handler ---
 function shiftRmBySamples(originalRmArray, samples) {
   const n = Number.parseInt(samples, 10);
@@ -326,6 +430,23 @@ function toggleShift(event) {
     const domain = x.domain();
     const filteredRm30 = rm30DataCurrent.filter(d => d.Date >= domain[0] && d.Date <= domain[1]);
     const filteredRm200 = rm200DataCurrent.filter(d => d.Date >= domain[0] && d.Date <= domain[1]);
+
+ const visibleCrossings = crossingsData.filter(d => d.date >= domain[0] && d.date <= domain[1]);
+    //Wizualizacja przecięć
+const dotRadius = 5; // Promień kropki
+
+svg.selectAll(".crossings-dot")
+    .data(crossingsData) // Używamy danych z poprawną wartością Y
+    .enter()
+    .append("circle")
+    .attr("class", d => "crossings-dot " + d.direction) // Dodanie klasy dla up/down
+    .attr("r", dotRadius)
+    .attr("cx", d => x(d.date))
+    .attr("cy", d => y(d.value))
+    .style("fill", d => d.direction === 'up' ? 'green' : 'red');
+
+    // Debug
+console.log('crossingsData total:', crossingsData.length, 'visible:', visibleCrossings.length, visibleCrossings);
 
     svg.select(".line-rm30")
       .transition()
